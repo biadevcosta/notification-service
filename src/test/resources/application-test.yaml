@@ -1,0 +1,12 @@
+# Integration-test profile: fast retry so the dead-letter path is quick to assert.
+spring:
+  rabbitmq:
+    listener:
+      simple:
+        retry:
+          enabled: true
+          max-attempts: 2
+          initial-interval: 200ms
+app:
+  email:
+    api-key: test-key

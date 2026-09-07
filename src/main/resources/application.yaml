@@ -1,5 +1,6 @@
 server:
   port: 8082
+
 spring:
   application:
     name: notification
@@ -7,3 +8,44 @@ spring:
     url: jdbc:mysql://localhost:3307/notification_db
     username: root
     password: root
+  flyway:
+    locations: classpath:db/migration
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+    listener:
+      simple:
+        acknowledge-mode: auto
+        default-requeue-rejected: false   # rejected -> DLQ, not back onto the queue
+        retry:
+          enabled: true
+          max-attempts: 3
+          initial-interval: 2s
+  cache:
+    cache-names: patient-contacts
+    caffeine:
+      spec: maximumSize=1000,expireAfterWrite=10m
+
+# Custom properties consumed by infrastructure (bound with @ConfigurationProperties).
+app:
+  reminder:
+    rabbit:
+      exchange: appointment.reminders    # declared by scheduling-service
+      queue: reminder.queue
+      routing-key: appointment.reminder
+      dlq: reminder.dlq
+  identity:
+    base-url: http://localhost:8080
+  email:
+    api-url: https://api.brevo.com/v3/smtp/email
+    api-key: ${BREVO_API_KEY:}                                  # env var, never committed
+    from-email: ${BREVO_FROM_EMAIL:no-reply@hospital.local}     # a verified sender in Brevo
+    from-name: Hospital Appointments
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
