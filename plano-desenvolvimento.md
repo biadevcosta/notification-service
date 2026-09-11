@@ -9,6 +9,13 @@ Documento de trabalho para construir o `notification-service` **passo a passo**,
 > 2. **Envio de e-mail real** via **Brevo** (API REST, 300/dia grátis, sem domínio) — atrás da porta `EmailSender`.
 > 3. **Idempotência com banco**: tabela `processed_reminders` (MySQL `notification_db`), chave = `appointmentId`.
 > 4. Sem API pública, sem GraphQL, sem JWT — é um **consumidor**.
+>
+> **Revisão (2026-09-11):** decisão 2 simplificada — `BrevoEmailSender` foi removido e trocado por
+> `LoggingEmailSender` (só loga, simula sucesso). O objetivo imediato é validar o fluxo da fila
+> (RabbitMQ → resolve paciente → idempotência → DLQ) sem depender de conta/API key de provedor
+> real; a integração com Brevo (ou outro provedor) fica pra uma segunda etapa — a porta
+> `EmailSender` já existe exatamente pra essa troca ser um novo adapter, sem tocar no core (ver
+> `README.md` §2).
 
 ---
 
