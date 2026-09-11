@@ -1,5 +1,6 @@
 package com.biadevcosta.notification;
 
+import com.biadevcosta.notification.application.port.ProcessedReminderStore;
 import com.biadevcosta.notification.infrastructure.messaging.AppointmentReminderMessage;
 import com.biadevcosta.notification.support.AbstractIntegrationTest;
 import com.github.tomakehurst.wiremock.WireMockServer;
@@ -11,6 +12,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.HttpStatus;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -18,19 +20,18 @@ import org.springframework.test.context.DynamicPropertySource;
 import java.time.LocalDateTime;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
-import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
-import static com.github.tomakehurst.wiremock.client.WireMock.matchingJsonPath;
+import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.okJson;
-import static com.github.tomakehurst.wiremock.client.WireMock.post;
-import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * End to end: real MySQL + RabbitMQ (Testcontainers), identity-service and Brevo stubbed with
- * WireMock. Skipped when Docker is unavailable (see {@link AbstractIntegrationTest}).
+ * End to end: real MySQL + RabbitMQ (Testcontainers), identity-service stubbed with WireMock.
+ * E-mail delivery is simulated by {@code LoggingEmailSender} (Brevo integration is a follow-up),
+ * so "sent" is observed as the reminder being recorded in {@code processed_reminders}. Skipped
+ * when Docker is unavailable (see {@link AbstractIntegrationTest}).
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @ActiveProfiles("test")
@@ -50,11 +51,12 @@ class NotificationIntegrationTest extends AbstractIntegrationTest {
     @DynamicPropertySource
     static void externalServices(DynamicPropertyRegistry registry) {
         registry.add("app.identity.base-url", WIREMOCK::baseUrl);
-        registry.add("app.email.api-url", () -> WIREMOCK.baseUrl() + "/v3/smtp/email");
     }
 
     @Autowired
     RabbitTemplate rabbitTemplate;
+    @Autowired
+    ProcessedReminderStore processedReminderStore;
     @Value("${app.reminder.rabbit.exchange}")
     String exchange;
     @Value("${app.reminder.rabbit.routing-key}")
@@ -72,11 +74,9 @@ class NotificationIntegrationTest extends AbstractIntegrationTest {
                 appointmentId, patientId, LocalDateTime.of(2030, 12, 1, 10, 30)));
     }
 
-    private void awaitAtLeastBrevoCalls(int count) throws InterruptedException {
+    private void awaitProcessed(String appointmentId) throws InterruptedException {
         for (int i = 0; i < 100; i++) {
-            long calls = WIREMOCK.countRequestsMatching(
-                    postRequestedFor(urlEqualTo("/v3/smtp/email")).build()).getCount();
-            if (calls >= count) {
+            if (processedReminderStore.isProcessed(appointmentId)) {
                 return;
             }
             Thread.sleep(100);
@@ -84,39 +84,33 @@ class NotificationIntegrationTest extends AbstractIntegrationTest {
     }
 
     @Test
-    void reminder_resolvesPatient_thenSendsEmailViaBrevo() throws Exception {
+    void reminder_resolvesPatient_thenRecordsAsProcessed() throws Exception {
         WIREMOCK.stubFor(get(urlEqualTo("/users/pat-1")).willReturn(okJson(
                 "{\"id\":\"pat-1\",\"name\":\"John Doe\",\"email\":\"john@example.com\",\"role\":\"PATIENT\"}")));
-        WIREMOCK.stubFor(post(urlEqualTo("/v3/smtp/email"))
-                .willReturn(aResponse().withStatus(201).withHeader("Content-Type", "application/json")
-                        .withBody("{\"messageId\":\"m-1\"}")));
 
         publishReminder("apt-1", "pat-1");
-        awaitAtLeastBrevoCalls(1);
+        awaitProcessed("apt-1");
 
-        WIREMOCK.verify(postRequestedFor(urlEqualTo("/v3/smtp/email"))
-                .withRequestBody(matchingJsonPath("$.to[0].email", equalTo("john@example.com"))));
+        assertThat(processedReminderStore.isProcessed("apt-1")).isTrue();
     }
 
     @Test
-    void duplicateReminder_sendsOnlyOneEmail() throws Exception {
+    void duplicateReminder_resolvesThePatientOnlyOnce() throws Exception {
         WIREMOCK.stubFor(get(urlEqualTo("/users/pat-2")).willReturn(okJson(
                 "{\"id\":\"pat-2\",\"name\":\"Jane Roe\",\"email\":\"jane@example.com\",\"role\":\"PATIENT\"}")));
-        WIREMOCK.stubFor(post(urlEqualTo("/v3/smtp/email")).willReturn(aResponse().withStatus(201)));
 
         publishReminder("apt-2", "pat-2");
-        awaitAtLeastBrevoCalls(1);
+        awaitProcessed("apt-2");
         publishReminder("apt-2", "pat-2");
         Thread.sleep(1_000);
 
-        WIREMOCK.verify(1, postRequestedFor(urlEqualTo("/v3/smtp/email")));
+        WIREMOCK.verify(1, getRequestedFor(urlEqualTo("/users/pat-2")));
     }
 
     @Test
-    void whenBrevoRejects_theMessageIsDeadLettered() {
-        WIREMOCK.stubFor(get(urlEqualTo("/users/pat-3")).willReturn(okJson(
-                "{\"id\":\"pat-3\",\"name\":\"Bob Poe\",\"email\":\"bob@example.com\",\"role\":\"PATIENT\"}")));
-        WIREMOCK.stubFor(post(urlEqualTo("/v3/smtp/email")).willReturn(aResponse().withStatus(500)));
+    void whenPatientLookupFails_theMessageIsDeadLettered() {
+        WIREMOCK.stubFor(get(urlEqualTo("/users/pat-3")).willReturn(
+                aResponse().withStatus(HttpStatus.NOT_FOUND.value())));
 
         publishReminder("apt-3", "pat-3");
 

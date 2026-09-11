@@ -7,6 +7,3 @@ spring:
           enabled: true
           max-attempts: 2
           initial-interval: 200ms
-app:
-  email:
-    api-key: test-key

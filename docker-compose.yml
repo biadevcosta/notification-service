@@ -47,8 +47,6 @@ services:
       SPRING_RABBITMQ_HOST: rabbitmq
       # identity-service runs outside this compose (its own); reach it on the host
       APP_IDENTITY_BASE_URL: http://host.docker.internal:8080
-      BREVO_API_KEY: ${BREVO_API_KEY:-}
-      BREVO_FROM_EMAIL: ${BREVO_FROM_EMAIL:-no-reply@hospital.local}
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

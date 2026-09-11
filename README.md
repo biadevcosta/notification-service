@@ -4,6 +4,10 @@ Sends the patient a **confirmation e-mail** for every appointment reminder. It i
 no business API, no GraphQL, no JWT. It listens on a RabbitMQ queue, looks up the patient's contact
 from `identity-service`, and delivers the e-mail through a pluggable e-mail provider.
 
+> **Delivery is currently simulated** (`LoggingEmailSender` just logs the e-mail instead of calling
+> a real provider) — a real provider integration (Brevo) is a planned follow-up, not wired in yet.
+> Everything else (queue, dedup, DLQ, patient lookup) is real.
+
 Port **8082** (only `/actuator/health`). Database: `notification_db` (MySQL) — a single
 idempotency table.
 
@@ -32,14 +36,14 @@ scheduling-service ──publishes──▶ RabbitMQ exchange "appointment.remin
    │                                                          GET /users/{id}      │
    │                                                          (name + email, cached)│
    │   3. email    = EmailMessage.appointmentReminder(contact, scheduledAt)        │
-   │   4. EmailSender.send(email)                           ── HTTP ─▶ Brevo API    │
+   │   4. EmailSender.send(email)                     ── logs "Simulated e-mail..."│
    │   5. ProcessedReminderStore.markProcessed(appointmentId)  ─▶ notification_db  │
    │                                                                              │
    │  any exception ▶ Rabbit retries 3× ▶ message lands in "reminder.dlq"         │
    └──────────────────────────────────────────────────────────────────────────────┘
                                           │
                                           ▼
-                              patient's inbox ✉  (real e-mail via Brevo)
+                    container log: "Simulated e-mail sent to ..." (no real provider yet)
 ```
 
 The reminder message carries **ids only**, so the service must call `identity-service` to get the
@@ -50,22 +54,24 @@ patient does not hammer `identity`.
 
 ## 2. Clean Architecture — what is pluggable
 
-`domain` and `application` know **nothing** about RabbitMQ, Brevo, `RestClient` or MySQL. Every
-external collaborator is a **port** (interface) defined in the core; infrastructure supplies an adapter.
+`domain` and `application` know **nothing** about RabbitMQ, e-mail providers, `RestClient` or
+MySQL. Every external collaborator is a **port** (interface) defined in the core; infrastructure
+supplies an adapter.
 
 | Concern | Port (`application/port`) | Current adapter | Swap for — no core change |
 |---|---|---|---|
-| Send e-mail | `EmailSender` | `BrevoEmailSender` (HTTP → `api.brevo.com`) | `ResendEmailSender`, `SmtpEmailSender` (`JavaMailSender`), `LogEmailSender` |
+| Send e-mail | `EmailSender` | `LoggingEmailSender` (logs, simulates success) | `BrevoEmailSender`, `ResendEmailSender`, `SmtpEmailSender` (`JavaMailSender`) — the real-provider follow-up |
 | Patient contact | `UserDirectory` | `IdentityHttpUserDirectory` (`RestClient` + cache) | gRPC client, different HTTP client, test stub |
 | Idempotency | `ProcessedReminderStore` | `JdbcProcessedReminderStore` (MySQL) | Redis, in-memory |
 | Inbound transport | *(adapter, not a port)* | `ReminderListener` (`@RabbitListener`) | Kafka / SQS / HTTP endpoint — new listener, same use case |
 
-**Example — replace the e-mail provider.** `EmailMessage` is provider-neutral
-(`toEmail`, `toName`, `subject`, `htmlBody`). To move from Brevo to, say, Resend:
+**Example — plug in a real e-mail provider (the planned next step).** `EmailMessage` is
+provider-neutral (`toEmail`, `toName`, `subject`, `htmlBody`). To wire up Brevo (or any other):
 
-1. add `ResendEmailSender implements EmailSender` under `infrastructure/email/` (maps `EmailMessage`
-   to Resend's request body, reads its own `@ConfigurationProperties`);
-2. point the `@Bean EmailSender` in `infrastructure/config/UseCaseConfig` at the new class.
+1. add `BrevoEmailSender implements EmailSender` under `infrastructure/email/` (maps `EmailMessage`
+   to the provider's request body, reads its own `@ConfigurationProperties` for the API key/URL);
+2. remove (or un-`@Component`) `LoggingEmailSender` — `SendAppointmentReminderUseCase` takes
+   whichever single `EmailSender` bean Spring finds, autowired by type, no explicit `@Bean` needed.
 
 `SendAppointmentReminderUseCase`, `EmailMessage`, and every test of the core stay untouched.
 
@@ -88,9 +94,8 @@ Full seam analysis and the anti-patterns we avoid: `plano-desenvolvimento.md` §
 | Dependency | Why | How |
 |---|---|---|
 | **`identity-service`** (+ its MySQL) | `GET /users/{id}` → the patient's **name and e-mail** | `cd ../identity-service && docker compose up` |
-| a **registered patient** in `identity` with a real e-mail | the recipient | log in as the `identity` admin, `POST /users` with `role: PATIENT` and your e-mail |
+| a **registered patient** in `identity` (any e-mail — delivery is simulated) | the recipient the log line names | log in as the `identity` admin, `POST /users` with `role: PATIENT` |
 | **`scheduling-service`** (+ its MySQL + RabbitMQ) | actually publishes reminders when an appointment is created | `cd ../scheduling-service && docker compose up` — **or** publish a test message by hand (§5) |
-| a **Brevo account** | real e-mail delivery | see §4 |
 
 > `scheduling` and `notification` must talk to the **same** RabbitMQ. Either run one shared broker
 > (point both at it) or, for a quick test, run only `notification`'s RabbitMQ and publish the
@@ -100,19 +105,9 @@ Full seam analysis and the anti-patterns we avoid: `plano-desenvolvimento.md` §
 
 ## 4. Configuration
 
-E-mail (Brevo) — the API key is **never committed**; it comes from the environment:
-
-| Env var | Meaning |
-|---|---|
-| `BREVO_API_KEY` | Brevo → *SMTP & API* → **API key (v3)** |
-| `BREVO_FROM_EMAIL` | a **verified sender** e-mail in your Brevo account |
-
-Other keys (`application.yaml`, all with sane defaults): `app.identity.base-url`
-(`http://localhost:8080`), `app.reminder.rabbit.*` (matches `scheduling`), Rabbit listener retry
-(`max-attempts: 3`, then DLQ).
-
-Get a Brevo key: create a free account → *Senders, Domains & Dedicated IPs* → add and verify your
-sender e-mail → *SMTP & API* → *API Keys* → generate. Free tier: 300 e-mails/day.
+No e-mail-provider credentials needed right now (delivery is simulated). Keys that matter
+(`application.yaml`, all with sane defaults): `app.identity.base-url` (`http://localhost:8080`),
+`app.reminder.rabbit.*` (matches `scheduling`), Rabbit listener retry (`max-attempts: 3`, then DLQ).
 
 ---
 
@@ -135,22 +130,21 @@ mocked), and each adapter (`MockRestServiceServer` for the HTTP ones).
 ```
 
 `NotificationIntegrationTest` uses **Testcontainers** (RabbitMQ + MySQL) and **WireMock** (stubs
-`identity` and Brevo). It publishes a reminder and asserts: WireMock received a Brevo call with the
-patient's e-mail; a duplicate message triggers **one** Brevo call (idempotency); when Brevo returns
-`500` the message ends up in `reminder.dlq`. It **self-skips** when Docker is unavailable, so
-`./mvnw verify` still passes. JaCoCo line-coverage gate: 80%.
+`identity`). It publishes a reminder and asserts: the reminder ends up in `processed_reminders`
+(patient resolved, "e-mail" simulated); a duplicate message resolves the patient **only once**
+(idempotency); when the identity lookup fails, the message ends up in `reminder.dlq`. It
+**self-skips** when Docker is unavailable, so `./mvnw verify` still passes. JaCoCo line-coverage
+gate: 80%.
 
-### Manual — see a real e-mail
+### Manual — watch the simulated e-mail go out
 
 1. Start the pieces:
    ```bash
    cd identity-service && docker compose up -d          # identity on 8080 (+ its MySQL)
    cd ../notification-service
-   export BREVO_API_KEY=...   BREVO_FROM_EMAIL=you@verified.com
    docker compose up --build                             # rabbitmq + mysql-notification + notification
    ```
-2. In `identity`, register a patient with **your** e-mail (log in as admin, `POST /users`,
-   `role: PATIENT`). Note its `id`.
+2. In `identity`, register a patient (log in as admin, `POST /users`, `role: PATIENT`). Note its `id`.
 3. Publish a reminder — pick one:
    - **Via `scheduling-service`:** start it (pointing at the same RabbitMQ), log in, `scheduleAppointment`
      with that `patientId`. It publishes the reminder automatically.
@@ -159,10 +153,11 @@ patient's e-mail; a duplicate message triggers **one** Brevo call (idempotency);
      ```json
      { "appointmentId": "test-1", "patientId": "<the patient id>", "scheduledAt": "2030-12-01T10:00:00" }
      ```
-4. Watch `notification`'s log (`reminder sent to <email>`), then check the inbox.
-5. Re-publish the **same** `appointmentId` → the log says it was already processed, **no** second e-mail.
-6. Set a bad `BREVO_API_KEY` and publish → after 3 attempts the message appears in `reminder.dlq`
-   (RabbitMQ UI → *Queues*).
+4. Watch `notification`'s log — `LoggingEmailSender` prints `Simulated e-mail sent to <name>
+   <<email>> — subject: "..."`.
+5. Re-publish the **same** `appointmentId` → no second log line (idempotent — already processed).
+6. Publish with a `patientId` that doesn't exist in `identity` → after 3 attempts the message
+   appears in `reminder.dlq` (RabbitMQ UI → *Queues*).
 
 ---
 

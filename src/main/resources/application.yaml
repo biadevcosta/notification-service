@@ -38,11 +38,6 @@ app:
       dlq: reminder.dlq
   identity:
     base-url: http://localhost:8080
-  email:
-    api-url: https://api.brevo.com/v3/smtp/email
-    api-key: ${BREVO_API_KEY:}                                  # env var, never committed
-    from-email: ${BREVO_FROM_EMAIL:no-reply@hospital.local}     # a verified sender in Brevo
-    from-name: Hospital Appointments
 
 management:
   endpoints:
