@@ -11,6 +11,20 @@ from `identity-service`, and delivers the e-mail through a pluggable e-mail prov
 Port **8082** (only `/actuator/health`). Database: `notification_db` (MySQL) — a single
 idempotency table.
 
+> Part of the [Hospital Appointment System](../README.md) — see the root README for the
+> system-wide architecture, business rules, and how to run all four services together.
+
+## Key features
+
+- **`@RabbitListener`** consumer on `reminder.queue` — no inbound API of its own.
+- Resolves the patient's **current** name and e-mail from `identity-service` on demand (cached with
+  Caffeine), instead of storing a copy that could go stale.
+- **Idempotent**: a redelivered reminder (`appointmentId` already processed) is a no-op.
+- **Retry + dead-letter queue**: 3 retries on failure, then the message lands in `reminder.dlq`
+  instead of being lost or retried forever.
+- Delivery is a **pluggable port** (`EmailSender`) — currently a logging adapter that simulates
+  sending; swapping in a real provider (e.g. Brevo) requires no change to the domain or use case.
+
 ---
 
 ## 1. How it works (end to end)
@@ -74,8 +88,6 @@ provider-neutral (`toEmail`, `toName`, `subject`, `htmlBody`). To wire up Brevo 
    whichever single `EmailSender` bean Spring finds, autowired by type, no explicit `@Bean` needed.
 
 `SendAppointmentReminderUseCase`, `EmailMessage`, and every test of the core stay untouched.
-
-Full seam analysis and the anti-patterns we avoid: `plano-desenvolvimento.md` §3.
 
 ---
 
