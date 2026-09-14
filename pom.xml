@@ -17,6 +17,7 @@
 	<properties>
 		<java.version>21</java.version>
 		<jacoco.version>0.8.13</jacoco.version>
+		<allure.version>2.29.0</allure.version>
 		<wiremock.version>3.13.2</wiremock.version>
 		<testcontainers.version>1.21.3</testcontainers.version>
 	</properties>
@@ -123,6 +124,13 @@
 			<groupId>org.wiremock</groupId>
 			<artifactId>wiremock-standalone</artifactId>
 			<version>${wiremock.version}</version>
+			<scope>test</scope>
+		</dependency>
+		<!-- Allure JUnit 5 integration -->
+		<dependency>
+			<groupId>io.qameta.allure</groupId>
+			<artifactId>allure-junit5</artifactId>
+			<version>${allure.version}</version>
 			<scope>test</scope>
 		</dependency>
 	</dependencies>
